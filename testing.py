@@ -1,3 +1,4 @@
+import unified_planning.model.operators
 from unified_planning.shortcuts import *
 from snp_to_rt import SNP_RT_Transformer
 

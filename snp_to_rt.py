@@ -1,7 +1,10 @@
 import numpy as np
 import unified_planning as up
+import unified_planning.model.operators
 from unified_planning.model import Problem, Fluent, Action, Expression, ProblemKind
 from unified_planning.model.multi_agent import *
+from unified_planning.model.operators import CONSTANTS
+from unified_planning.model.operators import OperatorKind as OPS
 from unified_planning.engines import Engine
 from unified_planning.engines.mixins import CompilerMixin, CompilationKind
 from unified_planning.engines.results import CompilerResult
@@ -10,6 +13,10 @@ from typing import Optional, List
 from enum import Enum, auto
 from collections import defaultdict
 from unified_planning.model import *
+from unified_planning.shortcuts import *
+
+
+# CONST = CONSTANTS[2]
 
 
 def is_constant(node):
@@ -18,6 +25,15 @@ def is_constant(node):
 
 def is_parameter(node):
     return node.node_type in [OperatorKind.FLUENT_EXP]
+
+
+def get_operator_as_function(op):
+    return {OperatorKind.PLUS: Plus,
+            OperatorKind.MINUS: Minus,
+            OperatorKind.TIMES: Times,
+            OperatorKind.LT: LT,
+            OperatorKind.LE: LE,
+            }[op]
 
 
 def is_operator(node):
@@ -34,6 +50,13 @@ def constant_value(const):
         return v
     raise Exception('Couldn\'t parse constant')
 
+def get_actions(problem):
+    if isinstance(problem, MultiAgentProblem):
+        actions = []
+        for agent in problem.agents:
+            actions += agent.actions
+        return actions
+    return problem.actions
 
 def parse_lin(lin):
     stack = [(lin, 1)]  # Each item is (sub_expr, multiplier)
@@ -104,7 +127,13 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
         """Transforms the given SNP problem into an RT-compliant version."""
         self.problem = problem
         params, formulas, values, operators = self.extract_formulas()
-        params = sorted(list(params))
+        rt_params, rt_vals, operators = self.create_rt_formulas(params, formulas, values, operators)
+        # TODO: In this line, need to create new problem and substitute params, then use:
+        rt_fluents = self.make_formulas_into_fluents(params, rt_params, rt_vals, operators)
+        # TODO: and add the corresponding precons and effects into the new problem
+        return self.clone_prob(rt_fluents)
+
+    def create_rt_formulas(self, params, formulas, values, operators):
         param_ids = {par: i for i, par in enumerate(params)}
         rt_forms = []
         for dict_form in formulas:
@@ -113,23 +142,31 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
                 f[param_ids[p]] = dict_form[p]
             rt_forms.append(f)
 
+        modified_values = values.copy()
+        rt_params = []
         for i, row in enumerate(rt_forms):
             nonzero_indices = np.flatnonzero(row)
             if nonzero_indices.size > 0:
                 first_nonzero = row[nonzero_indices[0]]
-                rt_forms[i] /= first_nonzero
-                values[i] /= first_nonzero
+                row /= first_nonzero
+                modified_values[i] /= first_nonzero
+            rt_param = tuple(row)
+            rt_params.append(rt_param)
 
+        return rt_params, modified_values, operators
 
-        return self.clone_prob()
-
-    def get_actions(self):
-        if isinstance(self.problem, MultiAgentProblem):
-            actions = []
-            for agent in self.problem.agents:
-                actions += agent.actions
-            return actions
-        return self.problem.actions
+    def make_formulas_into_fluents(self, params, rt_formulas, values, operators):
+        rt_fluents = []
+        for i, rt_form in enumerate(rt_formulas):
+            non_zeros = list(np.flatnonzero(rt_form))
+            if len(non_zeros) == 0:
+                rt_fluents.append(get_operator_as_function(operators[i])(0, values[i]))
+            new_fluent = params[non_zeros.pop(0)]
+            while len(non_zeros) > 0:
+                k = non_zeros.pop(0)
+                new_fluent = Plus(new_fluent, Times(rt_form[k], params[k]))
+            rt_fluents.append(get_operator_as_function(operators[i])(new_fluent, values[i]))
+        return rt_fluents
 
     def extract_formulas(self):
         """Extract the linear formulas from the preconditions and effects of actions."""
@@ -138,7 +175,7 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
         formulas = []
         values = []
 
-        actions = self.get_actions()
+        actions = get_actions(self.problem)
         for action in actions:
             for prec in action.preconditions:
                 if not prec_is_comparison(prec):
@@ -157,15 +194,14 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
                 values.append(lin2.get(1, 0) - lin1.get(1, 0))
                 operators.append(operator)
 
-        return params, formulas, values, operators
+        return sorted(list(params)), formulas, values, operators
 
-    def clone_prob(self) -> Problem:
-        """Clone and transform the original problem."""
-        # Dummy placeholder
-        return self.problem
+    def clone_prob(self, rt_fluents) -> Problem:
+        raise NotImplementedError
 
     def is_rt_condition(self, expr: Expression) -> bool:
         """Check if expression is RT-compatible (i.e., x > c)."""
+        # TODO: Fix whatever is here
         # Dummy placeholder
         return True
 
