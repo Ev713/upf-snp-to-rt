@@ -9,11 +9,12 @@ from unified_planning.engines import Engine
 from unified_planning.engines.mixins import CompilerMixin, CompilationKind
 from unified_planning.engines.results import CompilerResult
 from unified_planning.exceptions import UPUsageError
-from typing import Optional, List
+from typing import Optional, List, OrderedDict
 from enum import Enum, auto
 from collections import defaultdict
 from unified_planning.model import *
 from unified_planning.shortcuts import *
+from typing import cast
 
 
 # CONST = CONSTANTS[2]
@@ -97,6 +98,67 @@ def parse_lin(lin):
     return result, parameters
 
 
+class ProblemSwapper:
+    def __init__(self, problem: Problem):
+        self.problem = problem
+        self.objects = []
+        self.fluent_map = OrderedDict()
+
+    def get_objects(self):
+        self.objects = self.problem.all_objects
+        return self.objects
+
+    def createEmptyProblem(self) -> Problem:
+        pass
+
+    def createFluentMap(self):
+        pass
+
+    def createActionMap(self):
+        pass
+
+
+class SAProblemSwapper(ProblemSwapper):
+    def createEmptyProblem(self):
+        return Problem()
+
+    def createFluentMap(self):
+        pass
+
+    def createActionMap(self):
+        pass
+
+class MAProblemSwapper(ProblemSwapper):
+    problem: MultiAgentProblem  # class-level override
+
+    def __init__(self, problem: MultiAgentProblem):
+        super().__init__(problem)
+        self.action_map = OrderedDict()
+
+    def createEmptyProblem(self):
+        return MultiAgentProblem()
+
+    def createFluentMap(self):
+        self.fluent_map['env'] = OrderedDict()
+        for fluent in self.problem.ma_environment.fluents:
+            self.fluent_map['env'][fluent.name] = fluent
+        for agent in self.problem.agents:
+            self.fluent_map[agent.name] = OrderedDict()
+            for fluent in agent.fluents:
+                self.fluent_map[agent.name][fluent.name] = fluent
+        return self.fluent_map
+
+    def createActionMap(self):
+        for agent in self.problem.agents:
+            self.action_map[agent.name] = OrderedDict()
+            for action in agent.actions:
+                self.action_map[agent.name][action.name] = OrderedDict()
+                self.action_map[agent.name][action.name]['parameters']=action.parameters
+                self.action_map[agent.name][action.name]['precs'] = action.preconditions
+                self.action_map[agent.name][action.name]['effs'] = action.effects
+
+
+
 class SNP_RT_Transformer(CompilerMixin, Engine):
     """
     Transforms a Simple Numeric Planning (SNP) problem into a Restricted Task (RT) problem,
@@ -126,12 +188,24 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
     def transform(self, problem: Problem) -> Problem:
         """Transforms the given SNP problem into an RT-compliant version."""
         self.problem = problem
+        if isinstance(problem, MultiAgentProblem):
+            self.swapper = MAProblemSwapper(problem)
+        else:
+            self.swapper = SAProblemSwapper(problem)
+        rt_prob=self.swapper.createEmptyProblem()
+        for o in self.swapper.get_objects():
+            rt_prob.add_object(o.name, o.type)
+        self.swapper.createFluentMap()
+        self.swapper.createActionMap()
+
+
         params, formulas, values, operators = self.extract_formulas()
         rt_params, rt_vals, operators = self.create_rt_formulas(params, formulas, values, operators)
         # TODO: In this line, need to create new problem and substitute params, then use:
         rt_fluents = self.make_formulas_into_fluents(params, rt_params, rt_vals, operators)
         # TODO: and add the corresponding precons and effects into the new problem
         return self.clone_prob(rt_fluents)
+
 
     def create_rt_formulas(self, params, formulas, values, operators):
         param_ids = {par: i for i, par in enumerate(params)}
