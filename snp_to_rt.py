@@ -13,9 +13,24 @@ from fractions import Fraction
 
 # CONST = CONSTANTS[2]
 
+def fluent_column_name(fluent, param_idx):
+    """Return a canonical column name for a fluent occurrence."""
+    if fluent == 1:
+        return "1"  # constant term, no index needed
+    if isinstance(fluent, tuple):
+        # fluent with parameters
+        return f"{fluent[0]}({','.join('p'+str(i+1) for i in range(len(fluent[1])))})" + ("" if param_idx == 0 else f"_{param_idx+1}")
+    else:
+        # fluent with no parameters
+        return fluent + ("" if param_idx == 0 else f"_{param_idx+1}")
+
+
+def operator_to_symbol(operator):
+    return {OperatorKind.LT:'<', OperatorKind.LE:'<=', OperatorKind.EQUALS: '='}[operator]
+
 def normalize_dataframe(df, dont_change_columns=None, ignore_as_divisor_columns=None,  add_coeffs=True, operator_column=None):
     if dont_change_columns is None:
-        ignore_columns = []
+        dont_change_columns = []
 
     if ignore_as_divisor_columns is None:
         ignore_as_divisor_columns = []
@@ -149,6 +164,7 @@ class ProblemSwapper:
         self.problem = problem
         self.objects = []
         self.fluent_map = OrderedDict()
+        self.new_prob = None
 
     def get_objects(self):
         self.objects = self.problem.all_objects
@@ -163,26 +179,35 @@ class ProblemSwapper:
     def createActionMap(self):
         pass
 
+    def add_fluent_to_env(self, new_fluent):
+        pass
+
 
 class SAProblemSwapper(ProblemSwapper):
-    def createEmptyProblem(self):
-        return Problem()
+
+    def __init__(self, problem: Problem):
+        super().__init__(problem)
+        self.new_prob = Problem()
 
     def createFluentMap(self):
-        pass
+        raise NotImplementedError
 
     def createActionMap(self):
-        pass
+        raise NotImplementedError
+
+    def add_fluent_to_env(self, new_fluent, agent=None):
+        raise NotImplementedError
 
 class MAProblemSwapper(ProblemSwapper):
     problem: MultiAgentProblem  # class-level override
 
     def __init__(self, problem: MultiAgentProblem):
         super().__init__(problem)
+        self.new_prob = MultiAgentProblem()
         self.action_map = OrderedDict()
 
-    def createEmptyProblem(self):
-        return MultiAgentProblem()
+    def add_fluent_to_env(self, new_fluent):
+        self.new_prob.multiagent_environment.add_fluent(new_fluent)
 
     def createFluentMap(self):
         self.fluent_map['env'] = OrderedDict()
@@ -274,21 +299,6 @@ class MAProblemSwapper(ProblemSwapper):
             args += fluent_arg_types
         return args
 
-def fluent_column_name(fluent, param_idx):
-    """Return a canonical column name for a fluent occurrence."""
-    if fluent == 1:
-        return "1"  # constant term, no index needed
-    if isinstance(fluent, tuple):
-        # fluent with parameters
-        return f"{fluent[0]}({','.join('p'+str(i+1) for i in range(len(fluent[1])))})" + ("" if param_idx == 0 else f"_{param_idx+1}")
-    else:
-        # fluent with no parameters
-        return fluent + ("" if param_idx == 0 else f"_{param_idx+1}")
-
-
-def operator_to_symbol(operator):
-    return {OperatorKind.LT:'<', OperatorKind.LE:'<=', OperatorKind.EQUALS: '='}[operator]
-
 
 class SNP_RT_Transformer(CompilerMixin, Engine):
     """
@@ -317,17 +327,6 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
         self.substitute_dict = {}
 
     def create_preconditions_table(self, readable_action_map):
-        # print(readable_action_map)
-        fluents = set()
-        for agent, actions in readable_action_map.items():
-            for action, data in actions.items():
-                for lin_prec, _, _ in data['precs']['lin']:
-                    for f_args in lin_prec:
-                        fluents.add(f_args[0])
-
-        # Make a sorted list to fix column order
-        fluents = sorted(fluents, key=lambda x: str(x))
-        print(fluents)
         column_counter = defaultdict(int)
         columns = ['agent', 'action', 'precondition_index', 'operator', 'value']
         for agent, actions in readable_action_map.items():
@@ -344,10 +343,8 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
                             column_counter[col_name] = None  # add new column
         columns += sorted(column_counter.keys())  # alphabetical order
 
-        # 2️⃣ Create empty DataFrame
         df_precs = pd.DataFrame(columns=columns)
 
-        # 3️⃣ Fill rows
         rows = []
         for agent, actions in readable_action_map.items():
             for action, data in actions.items():
@@ -419,17 +416,16 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
     def is_private(self, fluent, agent):
         return fluent in self.swapper.fluent_map[agent]
 
-
     def transform(self, problem: Problem) -> Problem:
         """Transforms the given SNP problem into an RT-compliant version."""
         self.problem = problem
-        if isinstance(problem, MultiAgentProblem):
+        is_multi_agent = isinstance(problem, MultiAgentProblem)
+        if is_multi_agent:
             self.swapper = MAProblemSwapper(problem)
         else:
             self.swapper = SAProblemSwapper(problem)
-        rt_prob=self.swapper.createEmptyProblem()
         for o in self.swapper.get_objects():
-            rt_prob.add_object(o.name, o.type)
+            self.swapper.new_prob.add_object(o.name, o.type)
         self.swapper.createFluentMap()
         self.swapper.createActionMap()
 
@@ -456,6 +452,7 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
 
             if not new_fluent_name in fluent_dict:
                 fluent_dict[new_fluent_name] = {Fluent(RealType(lower_bound, higher_bound), **args)}
+
             fluents_used.append(new_fluent_name)
             fluent = fluent_dict[new_fluent_name]
             readable_action_map
