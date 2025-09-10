@@ -29,12 +29,12 @@ def get_linear_problem():
 
 
     obj = pickup.parameter('obj')
-    pickup.add_precondition(Equals(x_loc(obj),robot_x_loc))
-    pickup.add_precondition(Equals(y_loc(obj),robot_y_loc))
+    pickup.add_precondition(Equals(x_loc(obj), robot_x_loc))
+    pickup.add_precondition(Equals(y_loc(obj), robot_y_loc))
     pickup.add_effect(holds(obj), True)
 
     battery=up.parameter('battery')
-    up.add_precondition(GE(battery_charge(battery),  10))
+    up.add_precondition(GE(battery_charge(b1),  10))
     up.add_precondition(LE(robot_y_loc, 9))
     up.add_precondition(LE(Plus(robot_y_loc, 1), robot_x_loc))
     up.add_effect(robot_y_loc, Plus(robot_y_loc, 1))
