@@ -9,7 +9,7 @@ def get_linear_problem():
 
     # Creating problem ‘variables’
     battery_type = UserType('Battery')
-    b1 = Object('battery', battery_type)
+    b1 = Object('b1', battery_type)
     battery_charge = Fluent("battery_charge", RealType(0, 100), battery=battery_type)
     rock_type = UserType('rock')
     rock = Object('Shiny', rock_type)

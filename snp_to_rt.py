@@ -24,7 +24,6 @@ def fluent_column_name(fluent, param_idx):
         # fluent with no parameters
         return fluent + ("" if param_idx == 0 else f"#{param_idx+1}")
 
-
 def operator_to_symbol(operator):
     return {OperatorKind.LT:'<', OperatorKind.LE:'<=', OperatorKind.EQUALS: '='}[operator]
 
@@ -69,14 +68,11 @@ def normalize_dataframe(df, dont_change_columns=None, ignore_as_divisor_columns=
 
     return df_frac
 
-
 def is_constant(node):
     return node.node_type in [OperatorKind.REAL_CONSTANT, OperatorKind.INT_CONSTANT]
 
-
 def simple_fluent(node):
     return node.node_type in [OperatorKind.FLUENT_EXP]
-
 
 def get_operator_as_function(op):
     return {OperatorKind.PLUS: Plus,
@@ -95,16 +91,11 @@ def get_operator_as_function(op):
 def get_fluent_from_simple_fluent(fluent):
     return str(fluent).split('(')[0]
 
-#def name_new_fluent(cols, row):
-
-
 def is_operator(node):
     return node.node_type in [OperatorKind.PLUS, OperatorKind.MINUS, OperatorKind.TIMES]
 
-
 def prec_is_comparison(node):
     return node.node_type in [OperatorKind.LE, OperatorKind.EQUALS, OperatorKind.LT]
-
 
 def constant_value(const):
     v = const.type.lower_bound
@@ -260,15 +251,17 @@ class MAProblemSwapper(ProblemSwapper):
         fluent_type = self.fluent_map[agent][fluent]['type']
         return fluent_type.lower_bound, fluent_type.upper_bound
 
-    def fluent_get_args(self, fluent, agent='env'):
+    def get_fluent_args(self, fluent, agent='env'):
         return self.fluent_map[agent][fluent]['args']
 
 
-    def generate_fluent_name(self, row, agent_name: str, ):
+    def generate_fluent_name(self, row, ):
         """
         Generate a fluent string and deduplicated name from a row.
         Adds agent_name prefix if the fluent is private.
         """
+        agent_name = row['agent']
+        row = row.drop('agent')
         parts = ["_"]
         for col, val in row.items():
             if val == 0:
@@ -278,12 +271,13 @@ class MAProblemSwapper(ProblemSwapper):
 
         return "".join(parts)
 
-    def get_new_fluent_range(self, row, agent_name: str, ):
+    def get_new_fluent_range(self, row ):
+        agent_name = row['agent']
+        row = row.drop('agent')
         total_lower = 0
         total_upper = 0
         for fluent_name, val in row.items():
-            if fluent_name.split('#')[-1].isdigit():
-                fluent_name = fluent_name.rsplit('#', 1)[0]
+            fluent_name = col_to_fluent_name(fluent_name)
             agent = agent_name if self.is_private(fluent_name, agent_name) else 'env'
             lower, upper = self.fluent_get_range(fluent_name, agent)
             total_lower += min(lower*val, upper*val)
@@ -291,17 +285,24 @@ class MAProblemSwapper(ProblemSwapper):
 
         return total_lower, total_upper
 
-    def get_new_fluents_args(self, row, agent_name: str, ):
+    def get_new_fluents_args(self, row ):
+        agent_name = row['agent']
+        row = row.drop('agent')
         args = []
         for fluent_name, val in row.items():
+            if val == 0:
+                continue
             if fluent_name.split('#')[-1].isdigit():
-                fluent_name = fluent_name.rsplit('#', 1)[0]
+                fluent_name = col_to_fluent_name(fluent_name)
             agent = agent_name if self.is_private(fluent_name, agent_name) else 'env'
-            fluent_arg_types = [a.type for a in self.fluent_get_args(fluent_name, agent)]
+            fluent_arg_types = [a.type for a in self.get_fluent_args(fluent_name, agent)]
             args += fluent_arg_types
         return args
 
-
+def col_to_fluent_name(col_name):
+    if col_name.split('#')[-1].isdigit():
+        return col_name.rsplit('#', 1)[0]
+    return col_name
 class SNP_RT_Transformer(CompilerMixin, Engine):
     """
     Transforms a Simple Numeric Planning (SNP) problem into a Restricted Task (RT) problem,
@@ -457,32 +458,25 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
         readable_action_map = self.create_readable_action_map()
         df_precs = self.create_preconditions_table(readable_action_map)
         df_effs = self.create_effects_table(readable_action_map)
-        print( df_precs)
-        print( df_effs)
+        print(df_precs)
+        print(df_effs)
 
-
-        new_prec_fluents_df = df_precs.drop(
-            ['agent', 'action', 'precondition_index', 'operator', 'value', 'coeff'],
-            axis=1,
-        )
         agents = list(df_precs['agent'])
         fluent_dict = {}
         fluent_vector_dict = {}
         fluents_used = []
         actions_dict: Dict[Tuple[str, str], InstantaneousAction] = {}
-        for idx, row in df_precs.iterrows():
-            agent_name = agents[idx]
 
-            print(row)
+        for idx, row in df_precs.iterrows():
 
             fluent_vector = row.drop(
-            ['agent', 'action', 'precondition_index', 'operator', 'value', 'args','coeff'])
-            new_fluent_name = self.swapper.generate_fluent_name(fluent_vector, agent_name)
-            lower_bound, higher_bound = self.swapper.get_new_fluent_range(fluent_vector, agent_name)
-            args = {f'p_{i}':p for i, p in enumerate(self.swapper.get_new_fluents_args(fluent_vector, agent_name))}
+            ['action', 'precondition_index', 'operator', 'value', 'args','coeff'])
+            new_fluent_name = self.swapper.generate_fluent_name(fluent_vector)
+            lower_bound, higher_bound = self.swapper.get_new_fluent_range(fluent_vector)
+            args = {f'p_{i}':p for i, p in enumerate(self.swapper.get_new_fluents_args(fluent_vector))}
 
             if not new_fluent_name in fluent_dict:
-                fluent_dict[new_fluent_name] = {Fluent(RealType(lower_bound, higher_bound), **args)}
+                fluent_dict[new_fluent_name] = Fluent(RealType(lower_bound, higher_bound), **args)
                 fluent_vector_dict[new_fluent_name] = fluent_vector
 
             fluents_used.append(new_fluent_name)
@@ -504,6 +498,7 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
             #        args_objects.append(action.parameters[a])
 
             action.add_precondition(get_operator_as_function(operator)(fluent(*args_objects), value))
+        df_precs['new_fluents'] = fluents_used
 
         for idx, row in df_effs.iterrows():
             agent_name = row['agent']
@@ -513,10 +508,20 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
             change = row['change']
 
             action = actions_dict.get((action_name, agent_name), self.empty_copy_action(action_name, agent_name))
-            relevant_cols = [c for c in df_precs.columns if c.split("#")[-1].isdigit() and target_fluent == c.rsplit('#', 1)[0]]
-            relevant_indices = df_precs.index[(df_precs[relevant_cols] != 0).any(axis=1)].tolist()
-            for i_prec in df_precs.iterrows():
-                print()
+            for new_f in fluent_vector_dict:
+                agent_name = new_f['agent']
+                pure_vector = new_f.drop('agent')
+                viable_params = []
+                fluent_cols = [c for c in new_f.columns() if target_fluent == col_to_fluent_name(c)]
+                for c in new_f.columns():
+                    c_fluent = col_to_fluent_name(c)
+                    c_args = self.swapper.get_fluent_args(c_fluent)
+                    print(c_args)
+                    return
+
+                    # Iterate over all object combinations for the fluent with fixed argument for col
+
+
 
             breakpoint()
 
