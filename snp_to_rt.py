@@ -1,3 +1,4 @@
+import itertools
 from collections import defaultdict
 
 import numpy as np
@@ -130,10 +131,11 @@ def parse_lin(lin):
 
             a, b = node.args
             if node.node_type in [OperatorKind.PLUS, OperatorKind.MINUS]:
+                coeff_b = coeff
                 if node.node_type == OperatorKind.MINUS:
-                    coeff *= -1
+                    coeff_b *= -1
                 stack.append((a, coeff))
-                stack.append((b, coeff))
+                stack.append((b, coeff_b))
 
             elif node.node_type == OperatorKind.TIMES:
                 if is_constant(a):
@@ -156,8 +158,9 @@ class ProblemSwapper:
         self.objects = []
         self.fluent_map = OrderedDict()
         self.new_prob = None
+        self.new_objects = {}
 
-    def get_objects(self):
+    def get_original_objects(self):
         self.objects = self.problem.all_objects
         return self.objects
 
@@ -172,7 +175,6 @@ class ProblemSwapper:
 
     def add_fluent_to_env(self, new_fluent):
         pass
-
 
 class SAProblemSwapper(ProblemSwapper):
 
@@ -201,11 +203,11 @@ class MAProblemSwapper(ProblemSwapper):
         self.new_prob.ma_environment.add_fluent(new_fluent)
 
     def createFluentMap(self):
-        self.fluent_map['env'] = OrderedDict()
+        self.fluent_map['_env'] = OrderedDict()
         for fluent in self.problem.ma_environment.fluents:
-            self.fluent_map['env'][fluent.name] = {}
-            self.fluent_map['env'][fluent.name]['type'] = fluent.type
-            self.fluent_map['env'][fluent.name]['args'] = fluent.signature
+            self.fluent_map['_env'][fluent.name] = {}
+            self.fluent_map['_env'][fluent.name]['type'] = fluent.type
+            self.fluent_map['_env'][fluent.name]['args'] = fluent.signature
         for agent in self.problem.agents:
             self.fluent_map[agent.name] = OrderedDict()
             for fluent in agent.fluents:
@@ -215,6 +217,16 @@ class MAProblemSwapper(ProblemSwapper):
         return self.fluent_map
 
     def createActionMap(self):
+        self.action_map['_env'] = OrderedDict()
+        self.action_map['_env']['_GOAL'] = OrderedDict()
+        self.action_map['_env']['_GOAL']['parameters'] = []
+        self.action_map['_env']['_GOAL']['precs'] = []
+        self.action_map['_env']['_GOAL']['effs'] = []
+        self.action_map['_env']['_INIT'] = OrderedDict()
+        self.action_map['_env']['_INIT']['parameters'] = []
+        self.action_map['_env']['_INIT']['precs'] = []
+        self.action_map['_env']['_INIT']['effs'] = []
+
         for agent in self.problem.agents:
             self.action_map[agent.name] = OrderedDict()
             for action in agent.actions:
@@ -222,9 +234,33 @@ class MAProblemSwapper(ProblemSwapper):
                 self.action_map[agent.name][action.name]['parameters']=action.parameters
                 self.action_map[agent.name][action.name]['precs'] = action.preconditions
                 self.action_map[agent.name][action.name]['effs'] = action.effects
+            self.action_map[agent.name]['_GOAL'] = OrderedDict()
+            self.action_map[agent.name]['_GOAL']['parameters'] = []
+            self.action_map[agent.name]['_GOAL']['precs'] = [g for g in agent.public_goals]
+            self.action_map[agent.name]['_GOAL']['effs'] = []
+            self.action_map[agent.name]['_INIT'] = OrderedDict()
+            self.action_map[agent.name]['_INIT']['parameters'] = []
+            self.action_map[agent.name]['_INIT']['precs'] = []
+            self.action_map[agent.name]['_INIT']['effs'] = []
+        init_fluents = [(get_fluent_from_simple_fluent(i), tuple(str(a) for a in i.args), self.problem.initial_value(i)) for i in self.problem.initial_values]
+        for fluent, fluent_args, value in init_fluents:
+            if '.' in fluent:
+                agent_name, fluent_name = fluent.split('.')
+            else:
+                agent_name, fluent_name = '_env', fluent
+            self.action_map[agent_name]['_INIT']['effs'].append((fluent_name, fluent_args, value))
 
     def createEmptyActionMap(self):
         empty_action_map = OrderedDict()
+        empty_action_map['_env'] = OrderedDict()
+        empty_action_map['_env']['_GOAL'] = OrderedDict()
+        empty_action_map['_env']['_GOAL']['parameters'] = []
+        empty_action_map['_env']['_GOAL']['precs'] = []
+        empty_action_map['_env']['_GOAL']['effs'] = []
+        empty_action_map['_env']['_INIT'] = OrderedDict()
+        empty_action_map['_env']['_INIT']['parameters'] = []
+        empty_action_map['_env']['_INIT']['precs'] = []
+        empty_action_map['_env']['_INIT']['effs'] = []
         for agent in self.problem.agents:
             empty_action_map[agent.name] = OrderedDict()
             for action in agent.actions:
@@ -232,42 +268,51 @@ class MAProblemSwapper(ProblemSwapper):
                 empty_action_map[agent.name][action.name]['parameters'] = []
                 empty_action_map[agent.name][action.name]['precs'] = []
                 empty_action_map[agent.name][action.name]['effs'] = []
+            empty_action_map[agent.name]['_GOAL'] = OrderedDict()
+            empty_action_map[agent.name]['_GOAL']['parameters'] = []
+            empty_action_map[agent.name]['_GOAL']['precs'] = []
+            empty_action_map[agent.name]['_GOAL']['effs'] = []
+            empty_action_map[agent.name]['_INIT'] = OrderedDict()
+            empty_action_map[agent.name]['_INIT']['parameters'] = []
+            empty_action_map[agent.name]['_INIT']['precs'] = []
+            empty_action_map[agent.name]['_INIT']['effs'] = []
+
         return empty_action_map
 
     def find_fluent(self, agent, fluent):
         name = str(fluent).split('(')[0]
         if name in self.fluent_map[agent]:
             return self.fluent_map[agent][name]
-        elif name in self.fluent_map['env']:
+        elif name in self.fluent_map['_env']:
             return self.fluent_map[agent][name]
         raise Exception(f"Fluent {name} not found")
 
     def is_private(self, fluent, agent):
         return fluent in self.fluent_map[agent]
 
-    def fluent_get_range(self, fluent, agent='env'):
+    def fluent_get_range(self, fluent, agent='_env'):
         if fluent == ONE[0]:
             return Fraction(1), Fraction(1)
         fluent_type = self.fluent_map[agent][fluent]['type']
         return fluent_type.lower_bound, fluent_type.upper_bound
 
-    def get_fluent_args(self, fluent, agent='env'):
+    def get_fluent_args(self, fluent, agent='_env'):
         return self.fluent_map[agent][fluent]['args']
 
 
-    def generate_fluent_name(self, row, ):
+    def generate_fluent_name(self, row):
         """
         Generate a fluent string and deduplicated name from a row.
         Adds agent_name prefix if the fluent is private.
         """
         agent_name = row['agent']
         row = row.drop('agent')
-        parts = ["_"]
+        parts = ["__"]
         for col, val in row.items():
             if val == 0:
                 continue
             sign = "P" if val > 0 else "M"
-            parts.append(f"{sign}{abs(val)}_{(agent_name if self.is_private(col, agent_name) else '')}_{col.lower()}")
+            parts.append(f"{sign}{abs(val)}__{(agent_name if self.is_private(col, agent_name) else 'ENV')}__{col.lower()}__")
 
         return "".join(parts)
 
@@ -277,8 +322,8 @@ class MAProblemSwapper(ProblemSwapper):
         total_lower = 0
         total_upper = 0
         for fluent_name, val in row.items():
-            fluent_name = col_to_fluent_name(fluent_name)
-            agent = agent_name if self.is_private(fluent_name, agent_name) else 'env'
+            fluent_name = remove_counter_suffixes(fluent_name)
+            agent = agent_name if self.is_private(fluent_name, agent_name) else '_env'
             lower, upper = self.fluent_get_range(fluent_name, agent)
             total_lower += min(lower*val, upper*val)
             total_upper += max(lower * val, upper * val)
@@ -293,16 +338,122 @@ class MAProblemSwapper(ProblemSwapper):
             if val == 0:
                 continue
             if fluent_name.split('#')[-1].isdigit():
-                fluent_name = col_to_fluent_name(fluent_name)
-            agent = agent_name if self.is_private(fluent_name, agent_name) else 'env'
+                fluent_name = remove_counter_suffixes(fluent_name)
+            agent = agent_name if self.is_private(fluent_name, agent_name) else '_env'
             fluent_arg_types = [a.type for a in self.get_fluent_args(fluent_name, agent)]
             args += fluent_arg_types
         return args
 
-def col_to_fluent_name(col_name):
+def remove_counter_suffixes(col_name):
     if col_name.split('#')[-1].isdigit():
         return col_name.rsplit('#', 1)[0]
     return col_name
+
+
+def create_preconditions_table(readable_action_map):
+    column_counter = defaultdict(int)
+    columns = ['agent', 'action', 'precondition_index', 'operator', 'value', 'args']
+    for agent, actions in readable_action_map.items():
+        for action, data in actions.items():
+            for lin_prec, _, _ in data['precs']['lin']:
+                # Count occurrences of each fluent in this precondition
+                local_counter = defaultdict(int)
+                for fluent in lin_prec:
+                    fluent_name, _ = fluent
+                    count = local_counter[fluent_name]
+                    col_name = fluent_column_name(fluent_name, count)
+                    local_counter[fluent_name] += 1
+                    if col_name not in column_counter:
+                        column_counter[col_name] = None  # add new column
+    columns += sorted(column_counter.keys())  # alphabetical order
+
+    df_precs = pd.DataFrame(columns=columns)
+
+    rows = []
+    for agent, actions in readable_action_map.items():
+        for action, data in actions.items():
+            for idx, (lin_prec, operator, value) in enumerate(data['precs']['lin']):
+                row = {'agent': agent, 'action': action, 'precondition_index': idx,
+                       'operator': operator_to_symbol(operator), 'value': value}
+                new_fluent_args = []
+                # Track local occurrences
+                local_counter = defaultdict(int)
+                for fluent in lin_prec:
+                    fluent_name, fluent_args = fluent
+                    new_fluent_args += fluent_args
+                    count = local_counter[fluent_name]
+                    col_name = fluent_column_name(fluent_name, count)
+                    row[col_name] = lin_prec[fluent]
+                    local_counter[fluent_name] += 1
+                # Fill remaining columns with 0
+                row['args'] = new_fluent_args
+                for col in df_precs.columns:
+                    if col not in row:
+                        row[col] = 0
+                rows.append(row)
+
+    return normalize_dataframe(pd.concat([df_precs, pd.DataFrame(rows)], ignore_index=True),
+                                   ignore_as_divisor_columns=['precondition_index', 'value'],
+                                   dont_change_columns=['precondition_index'], operator_column='operator')
+
+
+def create_effects_table(readable_action_map):
+    rows = []
+    for agent, actions in readable_action_map.items():
+        for action, data in actions.items():
+            for idx, (target_fluent, target_args, change) in enumerate(data['effs']['lin']):
+                row = {'agent': agent, 'action': action, 'effect_index': idx,
+                       'target_fluent': target_fluent, 'target_args':target_args, 'change': change}
+                rows.append(row)
+    return  pd.DataFrame(rows)
+
+
+def parse_comparison_precondition(prec):
+    if not prec_is_comparison(prec):
+            raise Exception("Not a comparison precondition!")
+    lin_node1, lin_node2 = prec.args
+    lin1 = parse_lin(lin_node1)
+    lin2 = parse_lin(lin_node2)
+    prec_simple_fluents = set(lin1.keys()) | set(lin2.keys())
+    operator = prec.node_type
+    prec_fluent = {}
+    for p in prec_simple_fluents:
+        if p != ONE:
+            prec_fluent[p] = lin1.get(p, 0) - lin2.get(p, 0)
+    value = lin2.get(ONE, 0) - lin1.get(ONE, 0)
+    return prec_fluent, operator, value
+
+def parse_simple_boolean_precondition(prec):
+    assert(prec.node_type == OperatorKind.FLUENT_EXP and str(prec.type)=="bool")
+    return get_fluent_from_simple_fluent(prec), prec.args
+
+def parse_simple_boolean_assignment_effect(eff):
+    target_var, expr_node = eff.fluent, eff.value
+    target_fluent = get_fluent_from_simple_fluent(target_var), target_var.args
+    target_name, target_args = target_fluent
+    value = eff.value
+    assert value.node_type == OperatorKind.BOOL_CONSTANT
+    return target_name, target_args, value
+
+def parse_simple_change_effect(eff):
+
+    if isinstance(eff, tuple):
+        fluent, args, value = eff
+        return fluent, args, value
+
+    target_var, expr_node = eff.fluent, eff.value
+    target_fluent = get_fluent_from_simple_fluent(target_var), target_var.args
+    target_name, target_args = target_fluent
+    # Try to parse the RHS as a linear expression
+    try:
+        lin_expr = parse_lin(expr_node)
+    except Exception:
+        raise Exception(f'Effect {target_var}={expr_node} is not convertible to numeric STRIPS.')
+    if set(lin_expr.keys()) == {ONE, target_fluent} and lin_expr.get(target_fluent) == 1:
+        return target_name, target_args, lin_expr[ONE]
+    raise Exception(f'Effect {target_var}={expr_node} is not convertible to numeric STRIPS.')
+
+
 class SNP_RT_Transformer(CompilerMixin, Engine):
     """
     Transforms a Simple Numeric Planning (SNP) problem into a Restricted Task (RT) problem,
@@ -329,110 +480,46 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
         self.problem = None
         self.substitute_dict = {}
 
-    def create_preconditions_table(self, readable_action_map):
-        column_counter = defaultdict(int)
-        columns = ['agent', 'action', 'precondition_index', 'operator', 'value', 'args']
-        for agent, actions in readable_action_map.items():
-            for action, data in actions.items():
-                for lin_prec, _, _ in data['precs']['lin']:
-                    # Count occurrences of each fluent in this precondition
-                    local_counter = defaultdict(int)
-                    for fluent in lin_prec:
-                        fluent_name, _ = fluent
-                        count = local_counter[fluent_name]
-                        col_name = fluent_column_name(fluent_name, count)
-                        local_counter[fluent_name] += 1
-                        if col_name not in column_counter:
-                            column_counter[col_name] = None  # add new column
-        columns += sorted(column_counter.keys())  # alphabetical order
-
-        df_precs = pd.DataFrame(columns=columns)
-
-        rows = []
-        for agent, actions in readable_action_map.items():
-            for action, data in actions.items():
-                for idx, (lin_prec, operator, value) in enumerate(data['precs']['lin']):
-                    row = {'agent': agent, 'action': action, 'precondition_index': idx,
-                           'operator': operator_to_symbol(operator), 'value': value}
-                    new_fluent_args = []
-                    # Track local occurrences
-                    local_counter = defaultdict(int)
-                    for fluent in lin_prec:
-                        fluent_name, fluent_args = fluent
-                        new_fluent_args += fluent_args
-                        count = local_counter[fluent_name]
-                        col_name = fluent_column_name(fluent_name, count)
-                        row[col_name] = lin_prec[fluent]
-                        local_counter[fluent_name] += 1
-                    # Fill remaining columns with 0
-                    row['args'] = new_fluent_args
-                    for col in df_precs.columns:
-                        if col not in row:
-                            row[col] = 0
-                    rows.append(row)
-
-        return normalize_dataframe(pd.concat([df_precs, pd.DataFrame(rows)], ignore_index=True),
-                                       ignore_as_divisor_columns=['precondition_index', 'value'],
-                                       dont_change_columns=['precondition_index'], operator_column='operator')
-
-    def create_effects_table(self, readable_action_map):
-        rows = []
-        for agent, actions in readable_action_map.items():
-            for action, data in actions.items():
-                for idx, (target_fluent, target_args, change) in enumerate(data['effs']['lin']):
-                    row = {'agent': agent, 'action': action, 'effect_index': idx,
-                           'target_fluent': target_fluent, 'target_args':[target_args], 'change': change}
-                    rows.append(row)
-        return  pd.DataFrame(rows)
-
-    def parse_comparison_precondition(self, prec):
-        if not prec_is_comparison(prec):
-                return None
-        lin_node1, lin_node2 = prec.args
-        lin1 = parse_lin(lin_node1)
-        lin2 = parse_lin(lin_node2)
-        prec_simple_fluents = set(lin1.keys()) | set(lin2.keys())
-        operator = prec.node_type
-        prec_fluent = {}
-        for p in prec_simple_fluents:
-            if p != ONE:
-                prec_fluent[p] = lin1.get(p, 0) - lin2.get(p, 0)
-        value = lin2.get(ONE, 0) - lin1.get(ONE, 0)
-        return prec_fluent, operator, value
-
-    def parse_simple_change_effect(self, eff):
-        target_var, expr_node = eff.fluent, eff.value
-        target_fluent = get_fluent_from_simple_fluent(target_var), target_var.args
-
-        # Try to parse the RHS as a linear expression
-        try:
-            lin_expr = parse_lin(expr_node)
-        except Exception:
-            return None
-        if set(lin_expr.keys()) == {ONE, target_fluent} and lin_expr.get(target_fluent) == 1:
-            return None
-        return target_fluent[0], target_fluent[1], lin_expr[ONE]
-
-
-    def create_readable_action_map(self):
+    def separate_linearfrom_boolean_effects_and_preconditions(self):
         readable_action_map = self.swapper.createEmptyActionMap()
         for agent in self.swapper.action_map:
             for action in self.swapper.action_map[agent]:
-                readable_action_map[agent][action]['precs'] = {'lin': [], 'non_lin': []}
-                readable_action_map[agent][action]['effs'] = {'lin': [], 'non_lin': []}
+
+                readable_action_map[agent][action]['precs'] = {'lin': [], 'bool': []}
+                readable_action_map[agent][action]['effs'] = {'lin': [], 'bool': []}
 
                 for prec in self.swapper.action_map[agent][action]['precs']:
-                    parsed_prec = self.parse_comparison_precondition(prec)
-                    if parsed_prec is not None:
-                        readable_action_map[agent][action]['precs']['lin'].append(parsed_prec)
+                    prec_parsers = [
+                        (parse_comparison_precondition, 'lin'),
+                        (parse_simple_boolean_precondition, 'bool'),
+                    ]
+
+                    for func, prec_type in prec_parsers:
+                        try:
+                            parsed_prec = func(prec)
+                            readable_action_map[agent][action]['effs'][prec_type].append(parsed_prec)
+                            break
+                        except Exception:
+                            continue
                     else:
-                        readable_action_map[agent][action]['precs']['non_lin'].append(prec)
+                        raise ValueError(f"Impossible to compile effect {prec} to numeric STRIPS.")
+
+
                 for eff in self.swapper.action_map[agent][action]['effs']:
-                    parsed_eff = self.parse_simple_change_effect(eff)
-                    if parsed_eff is not None:
-                        readable_action_map[agent][action]['effs']['lin'].append(parsed_eff)
+                    eff_parsers = [
+                        (parse_simple_change_effect, 'lin'),
+                        (parse_simple_boolean_assignment_effect, 'bool'),
+                    ]
+
+                    for func, eff_type in eff_parsers:
+                        try:
+                            parsed_eff = func(eff)
+                            readable_action_map[agent][action]['effs'][eff_type].append(parsed_eff)
+                            break
+                        except Exception:
+                            continue
                     else:
-                        readable_action_map[agent][action]['effs']['non_lin'].append(eff)
+                        raise ValueError(f"Impossible to compile effect {eff} to numeric STRIPS.")
         return readable_action_map
 
     def is_private(self, fluent, agent):
@@ -448,20 +535,23 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
         is_multi_agent = isinstance(problem, MultiAgentProblem)
         if is_multi_agent:
             self.swapper = MAProblemSwapper(problem)
+            for agent in self.problem.agents:
+                self.swapper.new_prob.add_agent(Agent(agent.name, self.swapper.new_prob))
         else:
             self.swapper = SAProblemSwapper(problem)
-        for o in self.swapper.get_objects():
+
+        for o in problem.all_objects:
             self.swapper.new_prob.add_object(o.name, o.type)
+            new_object = self.swapper.new_prob.object(o.name)
+            self.swapper.new_objects[o.name] = new_object
+
         self.swapper.createFluentMap()
         self.swapper.createActionMap()
 
-        readable_action_map = self.create_readable_action_map()
-        df_precs = self.create_preconditions_table(readable_action_map)
-        df_effs = self.create_effects_table(readable_action_map)
-        print(df_precs)
-        print(df_effs)
+        linear_actions_map = self.separate_linearfrom_boolean_effects_and_preconditions()
+        df_precs = create_preconditions_table(linear_actions_map)
+        df_effs = create_effects_table(linear_actions_map)
 
-        agents = list(df_precs['agent'])
         fluent_dict = {}
         fluent_vector_dict = {}
         fluents_used = []
@@ -476,30 +566,43 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
             args = {f'p_{i}':p for i, p in enumerate(self.swapper.get_new_fluents_args(fluent_vector))}
 
             if not new_fluent_name in fluent_dict:
-                fluent_dict[new_fluent_name] = Fluent(RealType(lower_bound, higher_bound), **args)
+                fluent_dict[new_fluent_name] = Fluent(new_fluent_name, RealType(lower_bound, higher_bound), **args)
                 fluent_vector_dict[new_fluent_name] = fluent_vector
+                self.swapper.add_fluent_to_env(fluent_dict[new_fluent_name])
 
             fluents_used.append(new_fluent_name)
             fluent = fluent_dict[new_fluent_name]
-            self.swapper.add_fluent_to_env(fluent)
 
             action_name, agent_name, operator, value, args = (df_precs.loc[idx, 'action'], df_precs.loc[idx, 'agent'],
                                                         df_precs.loc[idx, 'operator'], df_precs.loc[idx, 'value'],
                                                               df_precs.loc[idx, 'args'])
+            if action_name == '_GOAL':
+                args_objects = []
+                for a in args:
+                    new_arg = self.swapper.new_objects[str(a)]
+                    args_objects.append(new_arg)
+                precon = get_operator_as_function(operator)(fluent(*args_objects), value)
+                self.swapper.new_prob.agent(agent_name).add_public_goal(precon)
+            elif action_name == '_INIT':
+                continue
+            else:
+                if (action_name, agent_name) not in actions_dict:
+                    actions_dict[(action_name, agent_name)] = self.empty_copy_action(action_name, agent_name)
+                action = actions_dict[(action_name, agent_name)]
 
-            action = actions_dict.get((action_name, agent_name), self.empty_copy_action(action_name, agent_name))
-            args_objects = []
-            for a in args:
-                try:
-                    args_objects.append(action.parameter(str(a)))
-                except:
-                    pass
-            #    elif a in self.swapper.new_prob.objects():
-            #        args_objects.append(action.parameters[a])
+                args_objects = []
+                for a in args:
+                    if str(a) in self.swapper.new_objects:
+                        new_arg = self.swapper.new_objects[str(a)]
+                    else:
+                        new_arg = action.parameter(str(a))
+                    args_objects.append(new_arg)
+                precon = get_operator_as_function(operator)(fluent(*args_objects), value)
+                action.add_precondition(precon)
 
-            action.add_precondition(get_operator_as_function(operator)(fluent(*args_objects), value))
         df_precs['new_fluents'] = fluents_used
 
+        # Setting up effects
         for idx, row in df_effs.iterrows():
             agent_name = row['agent']
             action_name = row['action']
@@ -507,48 +610,76 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
             target_args = row['target_args']
             change = row['change']
 
-            action = actions_dict.get((action_name, agent_name), self.empty_copy_action(action_name, agent_name))
+            if action_name == '_GOAL':
+                continue
+            # For now assume that it is numeric. If it is a linear formula over fluents,
+            # we need to create the same formula using copies of the old fluents in the new problem and add this value.
+            if change == 0: # This happens when the change is an effect with linear function as the change TODO: Remove assumption
+                continue
+
+            if (action_name, agent_name) not in actions_dict:
+                actions_dict[(action_name, agent_name)] = self.empty_copy_action(action_name, agent_name)
+            action = actions_dict[(action_name, agent_name)]
+
             for new_f in fluent_vector_dict:
-                agent_name = new_f['agent']
-                pure_vector = new_f.drop('agent')
-                viable_params = []
-                fluent_cols = [c for c in new_f.columns() if target_fluent == col_to_fluent_name(c)]
-                for c in new_f.columns():
-                    c_fluent = col_to_fluent_name(c)
-                    c_args = self.swapper.get_fluent_args(c_fluent)
-                    print(c_args)
-                    return
 
-                    # Iterate over all object combinations for the fluent with fixed argument for col
+                # For every fluent in the new problem, for every combination of parameters in the new fluent
+                # change the value of this fluent by coeff(new_fluent, old_problem_fluent) * change
+                # If fluent appears numerous times in the new_fluent:
+                # for every appearance, designate it as the target fluent
+                # and treat all other appearances as a regular sub-fluent.
+
+                vector = fluent_vector_dict[new_f]
+                agent_name = vector['agent']
+                pure_vector = dict(vector.drop('agent'))
+                sub_fluents_params = []
+                is_changed=False
+                for sub_fluent in pure_vector:
+                    if remove_counter_suffixes(sub_fluent) == target_fluent and pure_vector[sub_fluent]!=0:
+                        is_changed = True
+                if not is_changed:
+                    continue
+                # This is a collection of possible parameters for every sub-fluent
+                for sub_fluent, val in pure_vector.items():
+                    if val == 0:
+                        sub_fluents_params.append([])
+                        continue
+                    sub_fluent = remove_counter_suffixes(sub_fluent)
+                    sub_fluents_agent = '_env' if not self.swapper.is_private(sub_fluent, agent_name) else agent_name
+                    sub_fluent_args = self.swapper.get_fluent_args(sub_fluent, sub_fluents_agent)
+                    possible_parameters = [list(self.swapper.new_prob.objects(a.type)) for a in sub_fluent_args]
+                    sub_fluents_params.append(possible_parameters)
+                for i, (sub_fluent, coeff) in enumerate(dict(pure_vector).items()):
+                    if remove_counter_suffixes(sub_fluent) != target_fluent:
+                        continue
+                    params = sub_fluents_params.copy()
+                    params[i] = [[a] for a in target_args]
+
+                    params = [arg_options for p in params for arg_options in p]
+                    for param_combination in itertools.product(*params):
+                        changing_fluent = fluent_dict[new_f](*param_combination)
+                        new_value = Plus(changing_fluent, Times(coeff, change))
+                        if action_name == '_INIT':
+                            self.swapper.new_prob.set_initial_value(changing_fluent, new_value)
+                        else:
+                            action.add_effect(changing_fluent, new_value)
+
+        for (action_name, agent_name), action in actions_dict.items():
+            if action_name == '_INIT' or action_name == '_GOAL':
+                continue
+            if agent_name == '_env':
+                self.swapper.new_prob.add_action(action)
+            else:
+                self.swapper.new_prob.agent(agent_name).add_action(action)
 
 
+        # TODO:
+        #  1. Add initial values assignment.
+        #  2. Add non linear preconditions and effects to actions (can assume simplicity, I think)
+        #  3. Clean everything up and possibly remove swapper
 
-            breakpoint()
-
-
-
-        # new fluent - defined by coefficients, fluents, object types of fluent params
-        # precondition, effect - defined by new fluent with action parameter objects as parameters
-        # V - Step 1: Write every action and precondition and effect in a readable form.
-        # V - Step 1.5 represent each new fluent as vector on table: f1_p1, f1_p2, ... f2_p1, ... where number of each
-        # parameters for each fluent is determined by the largest number of same fluents in a precondition.
-        # Step 2: Use preconditions to write out which new fluents will be created.
-        # Step 3: Prune duplicates.
-        # Step 3.5: Create new fluents
-        # Step 4: create new preconditions and effects for every action
-        breakpoint()
-        new_fluents_table = pd.DataFrame()
-
-
-
-        params, formulas, values, operators = self.extract_formulas()
-
-
-        rt_params, rt_vals, operators = self.create_rt_formulas(params, formulas, values, operators)
-        # TODO: In this line, need to create new problem and substitute params, then use:
-        rt_fluents = self.make_formulas_into_fluents(params, rt_params, rt_vals, operators)
-        # TODO: and add the corresponding precons and effects into the new problem
-        return self.clone_prob(rt_fluents)
+        print(self.swapper.new_prob)
+        return self.swapper.new_prob
 
     def create_rt_formulas(self, params, formulas, values, operators):
         param_ids = {par: i for i, par in enumerate(params)}
