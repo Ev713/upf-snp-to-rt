@@ -559,6 +559,16 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
             for action in boolean_action_map[agent]:
                 boolean_effects[(agent, action)] = boolean_action_map[agent][action]["effs"]
 
+        for (agent_name, action_name), effect in boolean_effects.items():
+            fluent_name, val = effect
+            if self.is_private(fluent, agent_name):
+                if fluent not in fluent_dict:
+                    params = {p.name: p.type for p in self.swapper.fluent_map[agent_name][fluent_name]['args']}
+                    fluent_dict[fluent_name] = Fluent(fluent_name, BoolType(), **params)
+                    self.swapper.new_prob.agent(agent_name).add_fluent(fluent_name)
+                fluent = Dot(self.swapper.new_prob.agent(agent_name), fluent)
+            if action_name == '_INIT':
+                fluent, val = effect
 
         """
         for agent_name in boolean_action_map:
