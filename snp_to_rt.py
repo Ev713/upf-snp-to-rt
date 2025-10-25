@@ -1,6 +1,7 @@
 import itertools
 from collections import defaultdict
 
+from pandas.core.computation.ops import isnumeric
 from unified_planning.model.multi_agent import *
 from unified_planning.engines.mixins import CompilerMixin, CompilationKind
 from unified_planning.engines.results import CompilerResult
@@ -77,7 +78,7 @@ class MAProblemSwapper(ProblemSwapper):
                     for func, action_map in prec_parsers:
                         try:
                             parsed_prec = func(prec)
-                            action_map[agent][action]['effs'].append(parsed_prec)
+                            action_map[agent][action]['precs'].append(parsed_prec)
                             break
                         except Exception:
                             continue
@@ -144,12 +145,15 @@ class MAProblemSwapper(ProblemSwapper):
             self.action_map[agent.name]['_INIT']['parameters'] = []
             self.action_map[agent.name]['_INIT']['precs'] = []
             self.action_map[agent.name]['_INIT']['effs'] = []
-        init_fluents = [(get_fluent_from_simple_fluent(i), tuple(str(a) for a in i.args), self.problem.initial_value(i)) for i in self.problem.initial_values]
-        for fluent, fluent_args, value in init_fluents:
-            if '.' in fluent:
-                agent_name, fluent_name = fluent.split('.')
+        init_fluents = [(i, self.problem.initial_value(i)) for i in self.problem.initial_values]
+        for fluent, value in init_fluents:
+            if '.' in str(fluent):
+                agent_name, fluent_name = str(fluent).split('.')
+                fluent_name = get_fluent_from_simple_fluent(fluent_name)
+                fluent_args = fluent.args[0].args
             else:
-                agent_name, fluent_name = '_env', fluent
+                agent_name, fluent_name = '_env', get_fluent_from_simple_fluent(fluent)
+                fluent_args = fluent.args
             self.action_map[agent_name]['_INIT']['effs'].append((fluent_name, fluent_args, value))
 
     def createEmptyActionMap(self):
@@ -429,9 +433,9 @@ def create_linear_preconditions_table(linear_actions_map):
                                    dont_change_columns=['precondition_index'], operator_column='operator')
 
 
-def create_effects_table(readable_action_map):
+def create_effects_table(linear_action_map):
     rows = []
-    for agent, actions in readable_action_map.items():
+    for agent, actions in linear_action_map.items():
         for action, data in actions.items():
             for idx, (target_fluent, target_args, change) in enumerate(data['effs']):
                 row = {'agent': agent, 'action': action, 'effect_index': idx,
@@ -457,11 +461,18 @@ def parse_comparison_precondition(prec):
 
 def parse_simple_boolean_precondition(prec):
     assert(prec.node_type == OperatorKind.FLUENT_EXP and str(prec.type)=="bool")
-    return get_fluent_from_simple_fluent(prec), prec.args
+    return get_fluent_from_simple_fluent(prec), tuple(str(a) for a in prec.args)
 
 def parse_simple_boolean_assignment_effect(eff):
+    if isinstance(eff, tuple):
+        fluent, args, value = eff
+        if value.node_type == OperatorKind.BOOL_CONSTANT:
+            value = str(value) == 'true'
+            return fluent, args, value
+        else:
+            raise Exception("Value is not a number")
     target_var, expr_node = eff.fluent, eff.value
-    target_fluent = get_fluent_from_simple_fluent(target_var), (str(a) for a in target_var.args)
+    target_fluent = get_fluent_from_simple_fluent(target_var), tuple(str(a) for a in target_var.args)
     target_name, target_args = target_fluent
     value = eff.value
     assert value.node_type == OperatorKind.BOOL_CONSTANT
@@ -472,17 +483,22 @@ def parse_simple_change_effect(eff):
 
     if isinstance(eff, tuple):
         fluent, args, value = eff
-        return fluent, args, value
+        if value.node_type in [OperatorKind.INT_CONSTANT, OperatorKind.REAL_CONSTANT]:
+            return fluent, args, value
+        else:
+            raise Exception("Value is not a number")
 
     target_var, expr_node = eff.fluent, eff.value
     target_fluent = get_fluent_from_simple_fluent(target_var), target_var.args
     target_name, target_args = target_fluent
+
     # Try to parse the RHS as a linear expression
     try:
         lin_expr = parse_linear_expression(expr_node)
     except Exception:
         raise Exception(f'Effect {target_var}={expr_node} is not convertible to numeric STRIPS.')
-    if set(lin_expr.keys()) == {ONE, target_fluent} and lin_expr.get(target_fluent) == 1:
+    assert target_fluent in lin_expr
+    if set(lin_expr.keys()) == {ONE, target_fluent} and lin_expr[target_fluent] == 1:
         return target_name, target_args, lin_expr[ONE]
     raise Exception(f'Effect {target_var}={expr_node} is not convertible to numeric STRIPS.')
 
@@ -549,68 +565,79 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
         fluents_used = []
         actions_dict: Dict[Tuple[str, str], InstantaneousAction] = {}
 
-        boolean_preconditions = {}
+        boolean_preconditions = []
         for agent in boolean_action_map:
             for action in boolean_action_map[agent]:
-                boolean_preconditions[(agent, action)] = boolean_action_map[agent][action]["precs"]
+                precs = boolean_action_map[agent][action]["precs"]
+                for prec in precs:
+                    boolean_preconditions.append(((agent, action), prec))
 
-        boolean_effects = {}
+        boolean_effects = []
         for agent in boolean_action_map:
             for action in boolean_action_map[agent]:
-                boolean_effects[(agent, action)] = boolean_action_map[agent][action]["effs"]
+                effs = boolean_action_map[agent][action]["effs"]
+                for eff in effs:
+                    boolean_effects.append(((agent, action), eff))
 
-        for (agent_name, action_name), effect in boolean_effects.items():
-            fluent_name, val = effect
-            if self.is_private(fluent, agent_name):
-                if fluent not in fluent_dict:
-                    params = {p.name: p.type for p in self.swapper.fluent_map[agent_name][fluent_name]['args']}
-                    fluent_dict[fluent_name] = Fluent(fluent_name, BoolType(), **params)
-                    self.swapper.new_prob.agent(agent_name).add_fluent(fluent_name)
-                fluent = Dot(self.swapper.new_prob.agent(agent_name), fluent)
-            if action_name == '_INIT':
-                fluent, val = effect
-
-        """
-        for agent_name in boolean_action_map:
-            for action_name in boolean_action_map[agent_name]:
-                if action_name == '_GOAL':
-                    for goal in boolean_action_map[agent_name][action_name]['precs']:
-                        if goal not in fluent_dict:
-                            fluent_dict[goal] = Fluent(goal, BoolType())
-                        self.swapper.new_prob.agent(action_name).add_public_goal(fluent_dict[goal])
-                elif action_name == '_INIT':
-                    for init, val in boolean_action_map[agent_name][action_name]['effs']:
-                        if init not in fluent_dict:
-                            fluent_dict[init] = Fluent(init, BoolType())
-                        self.swapper.new_prob.set_initial_value(fluent_dict[init], val)
+        for (agent_name, action_name), effect in boolean_effects:
+            fluent_name, args,  val = effect
+            if fluent_name not in fluent_dict:
+                params = {p.name: p.type for p in self.swapper.fluent_map[agent_name][fluent_name]['args']}
+                fluent_dict[fluent_name] = Fluent(fluent_name, BoolType(), **params)
+                if self.is_private(fluent_name, agent_name):
+                    self.swapper.new_prob.agent(agent_name).add_fluent(fluent_dict[fluent_name])
                 else:
-                    if (action_name, agent_name) not in actions_dict:
-                        actions_dict[(action_name, agent_name)] = self.empty_copy_action(action_name, agent_name)
-                    action = actions_dict[(action_name, agent_name)]
-                    param_names = [p.name for p in action.parameters]
-                    for prec in boolean_action_map[agent_name][action_name]['precs']:
-                        pass
-                    for eff in boolean_action_map[agent_name][action_name]['effs']:
-                        fluent_name, args, value = eff
-                        args_objects = []
-                        for arg in args:
-                            if arg in param_names:
-                                args_objects.append(action.parameter(arg))
-                            elif arg in [o.name for o in self.swapper.objects]:
-                                args_objects.append(self.swapper.new_prob.object(arg))
-                            else:
-                                raise Exception(f"Can't parse parameter {arg}")
-                        if fluent_name not in fluent_dict:
-                            params = {p.name:p.type for p in self.swapper.fluent_map[agent_name][fluent_name]['args']}
-                            fluent_dict[fluent_name] = Fluent(fluent_name, BoolType(), **params)
-                        fluent = fluent_dict[fluent_name]
-                        if self.is_private(fluent_name, agent_name):
-                            agent = self.swapper.new_prob.agent(agent_name)
-                            agent.add_fluent(fluent_dict[fluent_name])
-                            action.add_effect(Dot(agent, fluent(*args_objects)), value)
-                        else:
-                            action.add_effect(fluent(*args_objects), value)"""
+                    self.swapper.new_prob.add_fluent(fluent_dict[fluent_name])
+            fluent = fluent_dict[fluent_name]
+            if action_name == '_INIT':
+                object_args = [self.swapper.new_prob.object(str(arg)) for arg in args]
+                fluent = fluent(*object_args)
+                if self.is_private(fluent_name, agent_name):
+                    fluent = Dot(self.swapper.new_prob.agent(agent_name), fluent)
+                self.swapper.new_prob.set_initial_value(fluent, val)
+            else:
+                if action_name not in actions_dict:
+                    actions_dict[(action_name, agent_name)] = self.empty_copy_action(action_name, agent_name)
+                action = actions_dict[(action_name, agent_name)]
+                object_args = []
+                for arg in args:
+                    if arg in [p.name for p in action.parameters]:
+                        object_args.append(action.parameter(arg))
+                    else:
+                        try:
+                            object_args.append(self.swapper.new_prob.object(arg))
+                        except Exception as e:
+                            raise Exception(f"Couldn't recognize {arg} as neither object nor parameter")
+                action.add_effect(fluent(*object_args), val)
 
+        for (agent_name, action_name), prec in boolean_preconditions:
+            fluent_name, args = prec
+            if fluent_name not in fluent_dict:
+                params = {p.name: p.type for p in self.swapper.fluent_map[agent_name][fluent_name]['args']}
+                fluent_dict[fluent_name] = Fluent(fluent_name, BoolType(), **params)
+                if self.is_private(fluent_name, agent_name):
+                    self.swapper.new_prob.agent(agent_name).add_fluent(fluent_dict[fluent_name])
+                else:
+                    self.swapper.new_prob.add_fluent(fluent_dict[fluent_name])
+            fluent = fluent_dict[fluent_name]
+            if action_name == '_GOAL':
+                object_args = [self.swapper.new_prob.object(arg) for arg in args]
+                fluent = fluent(*object_args)
+                self.swapper.new_prob.agent(agent_name).add_public_goal(fluent)
+            else:
+                if action_name not in actions_dict:
+                    actions_dict[(action_name, agent_name)] = self.empty_copy_action(action_name, agent_name)
+                action = actions_dict[(action_name, agent_name)]
+                object_args = []
+                for arg in args:
+                    if arg in [p.name for p in action.parameters]:
+                        object_args.append(action.parameter(arg))
+                    else:
+                        try:
+                            object_args.append(self.swapper.new_prob.object(arg))
+                        except Exception as e:
+                            raise Exception(f"Couldn't recognize {arg} as neither object nor parameter")
+                action.add_precondition(fluent(*object_args))
 
         for idx, row in df_precs.iterrows():
             fluent_vector = row.drop(
@@ -662,14 +689,24 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
             action_name = row['action']
             target_fluent = row['target_fluent']
             target_args = row['target_args']
-            change = row['change']
-
-            if action_name == '_GOAL':
-                continue
 
             if (action_name, agent_name) not in actions_dict:
                 actions_dict[(action_name, agent_name)] = self.empty_copy_action(action_name, agent_name)
             action = actions_dict[(action_name, agent_name)]
+
+            obj_target_args = []
+            for arg in target_args:
+                arg_name = str(arg)
+                if arg_name in [p.name for p in action.parameters]:
+                    obj_target_args.append(action.parameter(arg_name))
+                elif arg_name in [o.name for o in self.swapper.new_prob.all_objects]:
+                    obj_target_args.append(self.swapper.new_prob.object(arg_name))
+                else:
+                    raise Exception(f"Couldn't parse parameter {arg_name}")
+            change = row['change']
+
+            if action_name == '_GOAL':
+                continue
 
             for new_f in fluent_vector_dict:
 
@@ -681,7 +718,7 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
 
                 vector = fluent_vector_dict[new_f]
                 agent_name = vector['agent']
-                pure_vector = dict(vector.drop('agent'))
+                pure_vector = OrderedDict(vector.drop('agent'))
                 sub_fluents_params = []
                 is_changed=False
                 for sub_fluent in pure_vector:
@@ -700,21 +737,24 @@ class SNP_RT_Transformer(CompilerMixin, Engine):
                     possible_parameters = [list(self.swapper.new_prob.objects(a.type)) for a in sub_fluent_args]
                     sub_fluents_params.append(possible_parameters)
                 for i, (sub_fluent, coeff) in enumerate(dict(pure_vector).items()):
-                    if remove_counter_suffix(sub_fluent) != target_fluent:
+                    if remove_counter_suffix(sub_fluent) != target_fluent or coeff==0:
                         continue
                     params = sub_fluents_params.copy()
-                    params[i] = [[a] for a in target_args]
-
+                    params[i] = [[a] for a in obj_target_args]
                     params = [arg_options for p in params for arg_options in p]
                     for param_combination in itertools.product(*params):
-                        changing_fluent = fluent_dict[new_f](*param_combination)
-                        new_value = Plus(changing_fluent, Times(coeff, change))
+                        fluent = fluent_dict[new_f]
+                        changing_fluent = fluent(*param_combination)
+                        new_value = Fraction(str(coeff)) * Fraction(str(change))
                         if action_name == '_INIT':
-                            self.swapper.new_prob.set_initial_value(changing_fluent, new_value)
+                            try:
+                                curr_v = Fraction(str(self.swapper.new_prob.initial_value(changing_fluent)))
+                            except:
+                                curr_v = 0
+                            adjusted_v = curr_v+new_value
+                            self.swapper.new_prob.set_initial_value(changing_fluent, adjusted_v)
                         else:
-                            action.add_effect(changing_fluent, new_value)
-
-
+                            action.add_effect(changing_fluent, Plus(changing_fluent, new_value))
 
         for (action_name, agent_name), action in actions_dict.items():
             if action_name == '_INIT' or action_name == '_GOAL':
